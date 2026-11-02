@@ -91,6 +91,53 @@ class PostgresSchemaReaderIT {
     }
 
     @Test
+    void testForeignKeyNamesAreIndependentOfSearchPath() throws Exception {
+        try (Connection conn =
+                        DriverManager.getConnection(
+                                postgres.getJdbcUrl(),
+                                postgres.getUsername(),
+                                postgres.getPassword());
+                Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE SCHEMA fk_source");
+            stmt.execute("CREATE SCHEMA fk_target");
+            try {
+                stmt.execute(
+                        "CREATE TABLE fk_target.\"Parent-Table\" (\"Key ID\" INT PRIMARY KEY)");
+                stmt.execute(
+                        """
+                        CREATE TABLE fk_source."Order-Item" (
+                            "Parent ID" INT,
+                            CONSTRAINT "FK-Parent" FOREIGN KEY ("Parent ID")
+                                REFERENCES fk_target."Parent-Table" ("Key ID")
+                        )
+                        """);
+
+                // One connection can resolve the source table without a schema prefix,
+                // while another must qualify both relations.
+                for (String searchPath : new String[] {"fk_source", "pg_catalog"}) {
+                    PostgresSchemaReader schemaReader =
+                            new PostgresSchemaReader(
+                                    cleanJdbcUrl + "?currentSchema=" + searchPath,
+                                    postgres.getUsername(),
+                                    postgres.getPassword());
+
+                    SchemaInfo schemaInfo = schemaReader.inspectSchema("fk_source");
+                    assertThat(schemaInfo.foreignKeys()).hasSize(1);
+                    ForeignKeyInfo fk = schemaInfo.foreignKeys().getFirst();
+                    assertThat(fk.tableName()).isEqualTo("Order-Item");
+                    assertThat(fk.constraintName()).isEqualTo("FK-Parent");
+                    assertThat(fk.sourceColumn()).isEqualTo("Parent ID");
+                    assertThat(fk.foreignTableName()).isEqualTo("Parent-Table");
+                    assertThat(fk.foreignColumn()).isEqualTo("Key ID");
+                }
+            } finally {
+                stmt.execute("DROP SCHEMA fk_source CASCADE");
+                stmt.execute("DROP SCHEMA fk_target CASCADE");
+            }
+        }
+    }
+
+    @Test
     void testFindMissingIndexesThreshold() throws Exception {
         MissingIndexAnalysis analysis = reader.findMissingIndexes("public");
         assertThat(analysis).isNotNull();
